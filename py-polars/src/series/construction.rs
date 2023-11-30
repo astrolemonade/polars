@@ -309,16 +309,24 @@ impl PySeries {
     }
 
     #[staticmethod]
-    unsafe fn _from_buffer(
-        py: Python,
-        pointer: usize,
-        offset: usize,
-        length: usize,
+    unsafe fn _from_buffers(
         dtype: Wrap<DataType>,
-        base: &PyAny,
+        data: &[usize],
+        validity: Option<PySeries>,
+        offsets: Option<PySeries>,
     ) -> PyResult<Self> {
         let dtype = dtype.0;
         let base = base.to_object(py);
+
+        use DataType::*;
+        let data_buffer_dtype = match dtype {
+            Utf8 => Int8,
+            _ => None,
+        };
+        // let data = Self.from_buffer(dtype.to_physical())
+
+        let bitmap =
+            validity.map(|arr| arr.series.bool()?.chunks()..first().next().unwrap().values());
 
         let arr_boxed = match dtype {
             DataType::Int8 => unsafe { from_buffer_impl::<i8>(pointer, length, base) },
@@ -344,17 +352,52 @@ impl PySeries {
         let s = Series::from_arrow("", arr_boxed).unwrap().into();
         Ok(s)
     }
+
+    #[staticmethod]
+    unsafe fn _from_buffer(
+        py: Python,
+        pointer: usize,
+        offset: usize,
+        length: usize,
+        dtype: Wrap<DataType>,
+        base: &PyAny,
+    ) -> PyResult<Self> {
+        let dtype = dtype.0;
+        let base = base.to_object(py);
+
+        let s = match dtype {
+            DataType::Int8 => unsafe { from_buffer_impl::<i8>(pointer, length, base) },
+            DataType::Int16 => unsafe { from_buffer_impl::<i16>(pointer, length, base) },
+            DataType::Int32 => unsafe { from_buffer_impl::<i32>(pointer, length, base) },
+            DataType::Int64 => unsafe { from_buffer_impl::<i64>(pointer, length, base) },
+            DataType::UInt8 => unsafe { from_buffer_impl::<u8>(pointer, length, base) },
+            DataType::UInt16 => unsafe { from_buffer_impl::<u16>(pointer, length, base) },
+            DataType::UInt32 => unsafe { from_buffer_impl::<u32>(pointer, length, base) },
+            DataType::UInt64 => unsafe { from_buffer_impl::<u64>(pointer, length, base) },
+            DataType::Float32 => unsafe { from_buffer_impl::<f32>(pointer, length, base) },
+            DataType::Float64 => unsafe { from_buffer_impl::<f64>(pointer, length, base) },
+            DataType::Boolean => {
+                unsafe { from_buffer_boolean_impl(pointer, offset, length, base) }?
+            },
+            dt => {
+                return Err(PyTypeError::new_err(format!(
+                    "`from_buffer` requires a physical type as input for `dtype`, got {dt}",
+                )))
+            },
+        };
+        Ok(s)
+    }
 }
 
 unsafe fn from_buffer_impl<T: NativeType>(
     pointer: usize,
     length: usize,
     base: Py<PyAny>,
-) -> Box<dyn Array> {
+) -> Series {
     let pointer = pointer as *const T;
     let slice = unsafe { std::slice::from_raw_parts(pointer, length) };
     let arr = unsafe { arrow::ffi::mmap::slice_and_owner(slice, base) };
-    arr.to_boxed()
+    Series::from_arrow("", arr.to_boxed()).unwrap()
 }
 
 unsafe fn from_buffer_boolean_impl(
@@ -369,7 +412,8 @@ unsafe fn from_buffer_boolean_impl(
     let slice = unsafe { std::slice::from_raw_parts(pointer, length_in_bytes) };
     let arr_result = unsafe { arrow::ffi::mmap::bitmap_and_owner(slice, offset, length, base) };
     let arr = arr_result.map_err(PyPolarsErr::from)?;
-    Ok(arr.to_boxed())
+    let s = Series::from_arrow("", arr.to_boxed()).unwrap();
+    Ok(s)
 }
 fn get_boolean_buffer_length_in_bytes(length: usize, offset: usize) -> usize {
     let n_bits = offset + length;
@@ -380,4 +424,11 @@ fn get_boolean_buffer_length_in_bytes(length: usize, offset: usize) -> usize {
     } else {
         n_bytes + 1
     }
+}
+
+fn boolean_series_to_bitmap(s: PySeries) -> &Bitmap {
+    let s = s.series;
+    let ca = s.bool()?;
+    let b = ca.downcast_iter().next().unwrap();
+    b.values()
 }
