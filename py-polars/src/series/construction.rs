@@ -311,12 +311,11 @@ impl PySeries {
     #[staticmethod]
     unsafe fn _from_buffers(
         dtype: Wrap<DataType>,
-        data: &[usize],
+        data: PySeries,
         validity: Option<PySeries>,
         offsets: Option<PySeries>,
     ) -> PyResult<Self> {
         let dtype = dtype.0;
-        let base = base.to_object(py);
 
         use DataType::*;
         let data_buffer_dtype = match dtype {
@@ -325,8 +324,17 @@ impl PySeries {
         };
         // let data = Self.from_buffer(dtype.to_physical())
 
-        let bitmap =
-            validity.map(|arr| arr.series.bool()?.chunks()..first().next().unwrap().values());
+        let bitmap = validity.map(|arr| {
+            arr.series
+                .downcast_iter()
+                .next()
+                .bool()?
+                .chunks()
+                .first()
+                .next()
+                .unwrap()
+                .values()
+        });
 
         let arr_boxed = match dtype {
             DataType::Int8 => unsafe { from_buffer_impl::<i8>(pointer, length, base) },
